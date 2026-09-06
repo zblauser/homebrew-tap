@@ -1,0 +1,131 @@
+name: Bump formulas
+
+# Keeps every formula in this tap pointed at its upstream's latest release.
+# Nothing has to be wired into the program repos: drop a formula in Formula/
+# whose url is a GitHub tag tarball and it is maintained from here on.
+#
+# The tap's own GITHUB_TOKEN can push to the tap, so no PAT is involved.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      formula:
+        description: 'Bump only this formula (blank = all)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+# LoMux's release workflow also writes Formula/lomux.rb on tag. Serialize so the
+# two never race; the version compare below makes a second writer a no-op anyway.
+concurrency:
+  group: tap-write
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bump formulas to their latest upstream release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ONLY: ${{ inputs.formula }}
+        run: |
+          set -euo pipefail
+
+          changed=""
+
+          for f in Formula/*.rb; do
+            name=$(basename "$f" .rb)
+
+            if [ -n "${ONLY:-}" ] && [ "$ONLY" != "$name" ]; then
+              continue
+            fi
+
+            url=$(grep -m1 -E '^[[:space:]]*url "' "$f" | sed -E 's/.*url "([^"]+)".*/\1/')
+
+            case "$url" in
+              https://github.com/*/archive/refs/tags/*.tar.gz) ;;
+              *)
+                echo "skip $name: url is not a GitHub tag tarball ($url)"
+                continue
+                ;;
+            esac
+
+            repo=$(printf '%s' "$url" | sed -E 's#https://github.com/([^/]+/[^/]+)/archive/.*#\1#')
+            cur=$(printf '%s' "$url" | sed -E 's#.*/tags/(.+)\.tar\.gz$#\1#')
+
+            # A repo with no published release still has tags; fall back to the newest.
+            latest=$(gh api "repos/$repo/releases/latest" -q .tag_name 2>/dev/null || true)
+            if [ -z "$latest" ]; then
+              latest=$(gh api "repos/$repo/tags" -q '.[0].name' 2>/dev/null || true)
+            fi
+
+            if [ -z "$latest" ]; then
+              echo "skip $name: $repo has no releases or tags"
+              continue
+            fi
+
+            # A formula still holding a placeholder digest is rewritten even when the
+            # version already matches — that is the state that breaks brew install.
+            if [ "$latest" = "$cur" ] && ! grep -q PLACEHOLDER "$f"; then
+              echo "$name already at $cur"
+              continue
+            fi
+
+            newurl="https://github.com/$repo/archive/refs/tags/$latest.tar.gz"
+
+            # -f so a 404 HTML page is never hashed as if it were the tarball
+            curl -fsSL "$newurl" -o source.tar.gz
+            sha=$(sha256sum source.tar.gz | cut -d' ' -f1)
+
+            # `cargo install --locked` refuses to generate a lockfile, so a tarball
+            # without one fails at the build step for every user. Leave the formula
+            # on its last good version rather than publish a build that cannot work.
+            if grep -q -- '--locked' "$f" && ! tar tzf source.tar.gz | grep -q '/Cargo.lock$'; then
+              echo "::warning::$name $latest has no Cargo.lock in its tarball; leaving it at $cur"
+              rm -f source.tar.gz
+              continue
+            fi
+
+            rm -f source.tar.gz
+
+            tmp=$(mktemp)
+            sed -E \
+              -e "s#^([[:space:]]*)url \".*\"#\1url \"$newurl\"#" \
+              -e "s#^([[:space:]]*)sha256 \".*\"#\1sha256 \"$sha\"#" \
+              "$f" > "$tmp"
+            mv "$tmp" "$f"
+
+            if grep -q PLACEHOLDER "$f"; then
+              echo "::error::$name still contains PLACEHOLDER after rewrite"
+              exit 1
+            fi
+
+            echo "$name: $cur -> $latest ($sha)"
+            changed="${changed:+$changed, }$name ${latest#v}"
+          done
+
+          if [ -z "$(git status --porcelain -- Formula)" ]; then
+            echo "nothing to push"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula
+          git commit -m "bump: $changed"
+
+          # The release-triggered writer may have landed a commit while this ran.
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
+            echo "push attempt $attempt failed, retrying"
+            sleep 5
+          done
+          echo "::error::could not push after 3 attempts"
+          exit 1
