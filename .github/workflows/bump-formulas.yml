@@ -49,16 +49,23 @@ jobs:
 
             url=$(grep -m1 -E '^[[:space:]]*url "' "$f" | sed -E 's/.*url "([^"]+)".*/\1/')
 
+            # Two shapes: a tag tarball the formula builds from, or release assets
+            # (prebuilt binaries, one url/sha256 pair per platform block).
             case "$url" in
-              https://github.com/*/archive/refs/tags/*.tar.gz) ;;
+              https://github.com/*/archive/refs/tags/*.tar.gz) kind=tarball ;;
+              https://github.com/*/releases/download/*) kind=release ;;
               *)
-                echo "skip $name: url is not a GitHub tag tarball ($url)"
+                echo "skip $name: url is neither a tag tarball nor a release asset ($url)"
                 continue
                 ;;
             esac
 
-            repo=$(printf '%s' "$url" | sed -E 's#https://github.com/([^/]+/[^/]+)/archive/.*#\1#')
-            cur=$(printf '%s' "$url" | sed -E 's#.*/tags/(.+)\.tar\.gz$#\1#')
+            repo=$(printf '%s' "$url" | sed -E 's#https://github.com/([^/]+/[^/]+)/.*#\1#')
+            if [ "$kind" = tarball ]; then
+              cur=$(printf '%s' "$url" | sed -E 's#.*/tags/(.+)\.tar\.gz$#\1#')
+            else
+              cur=$(printf '%s' "$url" | sed -E 's#.*/releases/download/([^/]+)/.*#\1#')
+            fi
 
             # A repo with no published release still has tags; fall back to the newest.
             latest=$(gh api "repos/$repo/releases/latest" -q .tag_name 2>/dev/null || true)
@@ -75,6 +82,18 @@ jobs:
             # version already matches — that is the state that breaks brew install.
             if [ "$latest" = "$cur" ] && ! grep -q PLACEHOLDER "$f"; then
               echo "$name already at $cur"
+              continue
+            fi
+
+            if [ "$kind" = release ]; then
+              # Every asset must exist before anything is rewritten: a release whose
+              # build is still running would otherwise publish a half-bumped formula.
+              if ! python3 .github/bump-release-assets.py "$f" "$latest"; then
+                echo "::warning::$name $latest assets not all available yet; leaving it at $cur"
+                continue
+              fi
+              echo "$name: $cur -> $latest (release assets)"
+              changed="${changed:+$changed, }$name ${latest#v}"
               continue
             fi
 

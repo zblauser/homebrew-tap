@@ -11,5 +11,5 @@ brew tap zblauser/tap
 | `hum` | Terminal media player — local library, YouTube Music, podcasts | `brew install zblauser/tap/hum` |
 | `lomux` | Media converter and YouTube downloader with an egui GUI | `brew install zblauser/tap/lomux` |
 
-Both build from source. `hum` needs `zig` and links `libmpv`; `lomux` needs `rust` and `ffmpeg`.
+`hum` installs its prebuilt release binary (no zig, no compiling) and pulls in `mpv`; `--HEAD` builds from source with `zig`. `lomux` builds from source with `rust` and needs `ffmpeg`.
 
