@@ -47,7 +47,9 @@ jobs:
               continue
             fi
 
-            url=$(grep -m1 -E '^[[:space:]]*url "' "$f" | sed -E 's/.*url "([^"]+)".*/\1/')
+            # First stable url: a tag tarball or a release asset. The `head do` url
+            # (a .git clone) comes first in prebuilt formulas and must not be picked.
+            url=$(grep -m1 -E '^[[:space:]]*url "https://github.com/[^"]+/(archive/refs/tags/[^"]+\.tar\.gz|releases/download/[^"]+)"' "$f" | sed -E 's/.*url "([^"]+)".*/\1/' || true)
 
             # Two shapes: a tag tarball the formula builds from, or release assets
             # (prebuilt binaries, one url/sha256 pair per platform block).
